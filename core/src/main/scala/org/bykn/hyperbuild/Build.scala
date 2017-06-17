@@ -31,7 +31,6 @@ sealed trait Build[M[_], A] {
             } yield (a, fp)
           case Some(fpKey) =>
             memo.getOrElseUpdate(fpKey, ser)(lift(fab(a)))
-              .map { case (t, fp) => (t, fp) }
         }
       }
     }
@@ -53,7 +52,7 @@ sealed trait Build[M[_], A] {
         case Flatten(inner) =>
           deepFlatten(depth + 1, inner, ser)(_.flatMap(fn))
         case Keyed(toKey, _) =>
-          // caching superceed keying
+          // caching supersedes keying.
           deepFlatten(depth, toKey, ser)(fn)
         case Pure(t) =>
           // can't cache, but we can produce a fingerprint
