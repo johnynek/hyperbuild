@@ -5,9 +5,9 @@ import cats.effect.{ IO, Sync }
 import java.util.concurrent.atomic.AtomicLong
 
 class MemoryMemo extends Memo[IO] {
-  private[this] val cache: collection.mutable.Map[(String, Fingerprint), (Array[Byte], Fingerprint)] = collection.mutable.Map()
+  private[this] val cache: collection.mutable.Map[Fingerprint, (Array[Byte], Fingerprint)] = collection.mutable.Map()
 
-  private def onCache[T](fn: collection.mutable.Map[(String, Fingerprint), (Array[Byte], Fingerprint)] => T): T = cache.synchronized {
+  private def onCache[T](fn: collection.mutable.Map[Fingerprint, (Array[Byte], Fingerprint)] => T): T = cache.synchronized {
     fn(cache)
   }
 
@@ -25,23 +25,25 @@ class MemoryMemo extends Memo[IO] {
 
   def monadError = implicitly[Sync[IO]]
 
-  def fetch[T](key: String, inputs: Fingerprint, ser: Serialization[T]): IO[Option[(T, Fingerprint)]] = IO {
-    onCache(_.get((key, inputs))) match {
+  def fetch[T](key: Fingerprint, ser: Serialization[T]): IO[Option[(T, Fingerprint)]] = IO {
+    onCache(_.get(key)) match {
       case None =>
         val m = missesA.incrementAndGet
-        log(s"cache miss: $key, $inputs, $m") >> IO.pure(None)
+        log(s"cache miss: $key, $m") >> IO.pure(None)
       case Some((b, fp)) =>
         val h = hitsA.incrementAndGet
-        log(s"cache hit: $key, $inputs, $h")
+        log(s"cache hit: $key, $h")
         monadError.fromTry(ser.invert(b)).map { t => Some((t, fp)) }
     }
   }.flatten
 
-  def store[T](key: String, inputs: Fingerprint, value: IO[T], ser: Serialization[T]): IO[T] = value.flatMap { t =>
+  def store[T](key: Fingerprint, value: IO[T], ser: Serialization[T]): IO[(T, Fingerprint)] = value.flatMap { t =>
     IO {
       val s = storesA.incrementAndGet
-      onCache(_.update((key, inputs), (ser(t), Fingerprint.of(t)(ser))))
-      log(s"store: $key, $inputs, $s").map(_ => t)
+      val bytes = ser(t)
+      val fp = Fingerprint.ofBytes(bytes)
+      onCache(_.update(key, (bytes, fp)))
+      log(s"store: $key, $s").map(_ => (t, fp))
     }.flatten
   }
 }

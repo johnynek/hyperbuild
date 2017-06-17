@@ -5,6 +5,7 @@ import cats.effect.IO
 //import cats.implicits._
 
 import scala.spores._
+import IOModule.{ key }
 
 object Mutable extends java.io.Serializable {
   var evilBuilds: Int = 0
@@ -14,11 +15,10 @@ object Mutable extends java.io.Serializable {
  * for compile time safety)
  */
 object Examples {
-  val forty2 = Build.pure[IO, Int](42)
-    .cached
+  val forty2 = key(42)
     .mapCached(spore { _ * 42 })
 
-  val evil = Build.pure[IO, Int](42)
+  val evil = key(42)
     .cached
     .mapCached(spore {
       val ex = Mutable
@@ -70,4 +70,33 @@ class BuildTest extends FunSuite {
     assertIO(memo.hits, 0L)
     assertIO(memo.misses, 2L)
   }
+
+  test("test file/IO with caching") {
+
+    val memo = new MemoryMemo
+
+    import ExampleBuild.lines
+
+    assertBuild(memo, lines, 59)
+    assertIO(memo.stores, 1L)
+    assertIO(memo.hits, 0L)
+    assertIO(memo.misses, 1L)
+
+    // when we run again, we hit
+    assertBuild(memo, lines, 59)
+    assertIO(memo.stores, 1L)
+    assertIO(memo.hits, 1L)
+    assertIO(memo.misses, 1L)
+
+  }
+}
+
+object ExampleBuild {
+
+  val buildSbt = IOModule.source("build.sbt")
+
+  val lines = buildSbt
+    .next(spore { f =>
+      IO(io.Source.fromFile(f).getLines.size)
+    })
 }

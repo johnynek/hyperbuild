@@ -7,12 +7,15 @@ import scala.spores._
 import com.twitter.bijection.JavaSerializationInjection
 
 sealed trait Build[M[_], A] {
-  import Build.{Apply, Flatten, Cached, Pure}
+  import Build.{Apply, Flatten, Keyed, Cached, Pure}
 
   final def run(memo: Memo[M]): M[(A, Option[Fingerprint])] = {
     import memo.monadError
 
-    def cache[T, U, V](key: String, fn: Build[M, T => U], a: Build[M, T], ser: Serialization[V])(lift: U => M[V]): M[(V, Fingerprint)] = {
+    /**
+     * We only cache function application here
+     */
+    def cache[T, U, V](fn: Build[M, T => U], a: Build[M, T], ser: Serialization[V])(lift: U => M[V]): M[(V, Fingerprint)] = {
       val mf = fn.run(memo)
       val ma = a.run(memo)
       mf.product(ma).flatMap { case ((fab, fabF), (a, aF)) =>
@@ -27,32 +30,46 @@ sealed trait Build[M[_], A] {
               fp = Fingerprint.of(a)(ser)
             } yield (a, fp)
           case Some(fpKey) =>
-            memo.getOrElseUpdate(key, fpKey, ser)(lift(fab(a)))
+            memo.getOrElseUpdate(fpKey, ser)(lift(fab(a)))
               .map { case (t, fp) => (t, fp) }
         }
       }
     }
 
-    def deepFlatten[T, R](depth: Int, of: Build[M, T], ser: Serialization[R])(fn: T => M[R]): M[(R, Fingerprint)] = of match {
-      case Apply(f, a) =>
-        cache(s"Flatten_$depth/Apply", f, a, ser)(fn)
-      case Flatten(inner) =>
-        deepFlatten(depth + 1, inner, ser)(_.flatMap(fn))
-      case Pure(t) =>
-        // can't cache, but we can produce a fingerprint
-        fn(t).map { a =>
-          val fp0 = Fingerprint.of(a)(ser)
-          // need to include the depth:
-          val fp = Fingerprint.combine(Fingerprint(s"Flatten_$depth/Pure"), fp0)
-          (a, fp)
-        }
-      case Cached(inner, innerSer) =>
-        for {
-         topt <- deepFlatten(0, inner, innerSer)(monadError.pure)
-         r <- fn(topt._1)
-         fp = Fingerprint.combine(Fingerprint(s"Flatten_$depth/Cached"), topt._2)
-        } yield (r, fp)
+    def fingerprint[T](mt: M[T], prefix: Fingerprint)(implicit hp: HasFingerprint[M, T]): M[(T, Fingerprint)] =
+      for {
+        t <- mt
+        f <- hp.fingerprint(t)
+        total = Fingerprint.combine(prefix, f)
+      } yield (t, f)
+
+    def deepFlatten[T, R](depth: Int, of: Build[M, T], ser: Serialization[R])(fn: T => M[R]): M[(R, Fingerprint)] = {
+      def prefix(str: String): String = s"flatten_$depth/$str"
+      def fprefix(str: String): Fingerprint = Fingerprint(prefix(str))
+
+      of match {
+        case Apply(f, a) =>
+          cache(f, a, ser)(fn)
+        case Flatten(inner) =>
+          deepFlatten(depth + 1, inner, ser)(_.flatMap(fn))
+        case Keyed(toKey, _) =>
+          // caching superceed keying
+          deepFlatten(depth, toKey, ser)(fn)
+        case Pure(t) =>
+          // can't cache, but we can produce a fingerprint
+          fingerprint(fn(t), fprefix("pure"))(HasFingerprint.fromSer(ser))
+        case Cached(inner, innerSer) =>
+          // reset the caching, but update the fingerprint
+          for {
+           topt <- deepFlatten(0, inner, innerSer)(monadError.pure)
+           r <- fn(topt._1)
+           fp = Fingerprint.combine(fprefix("cached"), topt._2)
+          } yield (r, fp)
+      }
     }
+
+    def opt(m: M[(A, Fingerprint)]): M[(A, Option[Fingerprint])] =
+      m.map { case (a, fp) => (a, Some(fp)) }
 
     this match {
       case Pure(a) =>
@@ -70,22 +87,40 @@ sealed trait Build[M[_], A] {
           ma = maofp._1
           a <- ma
         } yield (a, None)
+      case Keyed(of, fp) =>
+        val ma = of.run(memo).map(_._1)
+        opt(fingerprint(ma, Fingerprint("keyed"))(fp))
       case Cached(other, ser) =>
-        deepFlatten(0, other, ser)(monadError.pure)
-          .map { case (a, fp) =>
-            (a, Some(fp))
-          }
+        opt(deepFlatten(0, other, ser)(monadError.pure))
     }
   }
 
   final def mapCached[B: Serialization](fn: Spore[A, B]): Build[M, B] =
-    Apply(Build.cachedFn[M, A, B](fn), this).cached
+    Apply(Build.mod[M].keyFn(fn), this).cached
 
-  final def cached(implicit ser: Serialization[A]): Build[M, A] =
-    Cached(this, ser)
+  final def cached(implicit ser: Serialization[A]): Build[M, A] = this match {
+    case Cached(of, _) =>
+      // don't nest caching, but use the new serialization
+      Cached(of, ser)
+    case other =>
+      Cached(other, ser)
+  }
+
+  final def toKey(implicit fp: HasFingerprint[M, A]): Build[M, A] = this match {
+    case Keyed(of, _) =>
+      Keyed(of, fp)
+    case notKeyed =>
+      Keyed(notKeyed, fp)
+  }
+
+  final def keyBy[B](fn: A => B)(implicit fp: HasFingerprint[M, B]): Build[M, A] =
+    toKey(fp.on(fn))
+
+  final def keyByM[B](fn: A => M[B])(implicit fp: HasFingerprint[M, B], m: Monad[M]): Build[M, A] =
+    toKey(fp.onM(fn))
 
   final def next[B: Serialization](fn: Spore[A, M[B]]): Build[M, B] =
-    Flatten[M, B](Apply[M, A, M[B]](Build.cachedFn[M, A, M[B]](fn), this)).cached
+    Flatten[M, B](Apply[M, A, M[B]](Build.mod[M].keyFn(fn), this)).cached
 
   /**
    * Transform to a new Monad N, renaming all the
@@ -97,6 +132,7 @@ sealed trait Build[M[_], A] {
       case Apply(fn, a) => Apply(fn.transform(f), a.transform(f))
       case Flatten(nested) => Flatten(nested.transform(f).map { ma => f(ma) })
       case Cached(inner, ser) => Cached(inner.transform(f), ser)
+      case Keyed(inner, fp) => Keyed(inner.transform(f), fp.transform(f))
     }
 }
 
@@ -114,6 +150,7 @@ object Build {
   }
   case class Flatten[M[_], A](nested: Build[M, M[A]]) extends Build[M, A]
   case class Cached[M[_], A](b: Build[M, A], ser: Serialization[A]) extends Build[M, A]
+  case class Keyed[M[_], A](b: Build[M, A], fp: HasFingerprint[M, A]) extends Build[M, A]
 
   implicit def app[M[_]]: Applicative[({type B[T] = Build[M, T]})#B] =
     new Applicative[({type B[T] = Build[M, T]})#B] {
@@ -122,31 +159,39 @@ object Build {
         Apply(fn, a)
     }
 
-  def pure[M[_], A](a: A): Build[M, A] =
-    Pure(a)
 
-  def pureM[M[_], A](ma: M[A]): Build[M, A] =
-    Flatten(Pure(ma))
+  def mod[M[_]]: Module[M] = new Module[M]
 
-  def key[M[_], A: Serialization](a: A): Build[M, A] =
-    Pure(a).cached
+  final class Module[M[_]] {
+    def pure[A](a: A): Build[M, A] =
+      Pure(a)
 
-  def cachedFn[M[_], A, B](fn: Spore[A, B]): Build[M, A => B] =
-    app[M].widen(Pure(fn).cached(new JavaSerializationInjection(fn.getClass.asInstanceOf[Class[Spore[A, B]]])))
+    def pureM[A](ma: M[A]): Build[M, A] =
+      Flatten(Pure(ma))
 
-  def failed[M[_], A, E](error: E)(implicit m: MonadError[M, E]): Build[M, A] =
-    pureM[M, A](m.raiseError(error))
+    def key[A](a: A)(implicit fp: HasFingerprint[M, A]): Build[M, A] =
+      Pure(a).toKey
 
-  def source[M[_]: Monad](fileName: String): Build[M, File] =
-    pure(new File(fileName))
+    def keyFn[A, B](fn: Spore[A, B]): Build[M, A => B] = {
+      val ser = new JavaSerializationInjection(fn.getClass.asInstanceOf[Class[Spore[A, B]]])
+      app[M].widen(key(fn)(HasFingerprint.fromSer(ser)))
+    }
 
-  def sources[M[_]: Monad](files: Set[String]): Build[M, Set[File]] =
-    files.toList.traverseU(source[M](_)).map(_.toSet)
+    def failed[A, E](error: E)(implicit m: MonadError[M, E]): Build[M, A] =
+      pureM(m.raiseError(error))
 
-  def roots[M[_]](b: Build[M, _]): List[_] = b match {
-    case Pure(a) => List(a)
-    case Apply(fn, a) => roots(fn) ++ roots(a)
-    case Flatten(nested) => roots(nested)
-    case Cached(b, _) => roots(b)
+    def source(fileName: String)(implicit me: MonadError[M, Throwable]): Build[M, File] =
+      pure(new File(fileName)).toKey
+
+    def sources(files: Set[String])(implicit me: MonadError[M, Throwable]): Build[M, Set[File]] =
+      files.toList.traverseU(source(_)).map(_.toSet)
+
+    def roots(b: Build[M, _]): List[_] = b match {
+      case Pure(a) => List(a)
+      case Apply(fn, a) => roots(fn) ++ roots(a)
+      case Flatten(nested) => roots(nested)
+      case Cached(b, _) => roots(b)
+      case Keyed(of, _) => roots(of)
+    }
   }
 }

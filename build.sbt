@@ -42,11 +42,14 @@ lazy val hyperbuild = project
   .settings(name := "root")
   .settings(hyperbuildSettings: _*)
   .settings(noPublish: _*)
+  .aggregate(core)
+  .dependsOn(core)
 
 lazy val core = project
   .in(file("core"))
   .settings(name := "hyperbuild-core")
   .settings(moduleName := "hyperbuild-core")
+  .settings(hyperbuildSettings: _*)
   .settings(libraryDependencies ++= Seq(
     "com.twitter" %% "bijection-core" % "0.9.5",
     "org.typelevel" %% "cats-core" % "0.9.0",
