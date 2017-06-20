@@ -25,6 +25,15 @@ class MemoryMemo extends Memo[IO] {
 
   def monadError = implicitly[Sync[IO]]
 
+  def runNamed[T](name: String)(b: => IO[T]): IO[T] =
+    for {
+      _ <- IO(println(s"building: $name"))
+      start <- IO(System.nanoTime)
+      t <- b
+      end <- IO(System.nanoTime)
+      _ <- IO(System.out.printf(s"done: $name in %.2fms\n", java.lang.Double.valueOf((end - start)/1000000.0)))
+    } yield t
+
   def fetch[T](key: Fingerprint, ser: Serialization[T]): IO[Option[(T, Fingerprint)]] = IO {
     onCache(_.get(key)) match {
       case None =>

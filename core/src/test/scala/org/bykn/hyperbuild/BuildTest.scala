@@ -94,9 +94,12 @@ class BuildTest extends FunSuite {
 object ExampleBuild {
 
   val buildSbt = IOModule.source("build.sbt")
+    .named("input: build.sbt")
 
   val lines = buildSbt
     .next(spore { f =>
       IO(io.Source.fromFile(f).getLines.size)
     })
+    .named("count build.sbt")
 }
+

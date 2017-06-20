@@ -7,7 +7,7 @@ import scala.spores._
 import com.twitter.bijection.JavaSerializationInjection
 
 sealed trait Build[M[_], A] {
-  import Build.{Apply, Flatten, Keyed, Cached, Pure}
+  import Build.{Apply, Flatten, Keyed, Cached, Pure, Named}
 
   final def run(memo: Memo[M]): M[(A, Option[Fingerprint])] = {
     import memo.monadError
@@ -54,6 +54,8 @@ sealed trait Build[M[_], A] {
         case Keyed(toKey, _) =>
           // caching supersedes keying.
           deepFlatten(depth, toKey, ser)(fn)
+        case Named(inner, name) =>
+          memo.runNamed(name) { deepFlatten(depth, inner, ser)(fn) }
         case Pure(t) =>
           // can't cache, but we can produce a fingerprint
           fingerprint(fn(t), fprefix("pure"))(HasFingerprint.fromSer(ser))
@@ -76,9 +78,14 @@ sealed trait Build[M[_], A] {
         monadError.pure((a, None))
       case Apply(fn, a) =>
         // Can't create use the cache without a serialization
-        val mf = fn.run(memo).map(_._1)
-        val ma = a.run(memo).map(_._1)
-        mf.ap(ma).map { (_, None) }
+        // but we can pass through a fingerprint by hashing the
+        // inputs since A => B is a pure function
+        (fn.run(memo) |@| a.run(memo)).map { case ((fab, fAB), (a, fA)) =>
+          val resultFP = (fAB |@| fA)
+            .map { (x, y) => Fingerprint.combineAll(Fingerprint("apply/result") :: x :: y :: Nil) }
+
+          (fab(a), resultFP)
+        }
       case Flatten(m) =>
         // We can't create a fingerprint without a serialization
         for {
@@ -89,6 +96,8 @@ sealed trait Build[M[_], A] {
       case Keyed(of, fp) =>
         val ma = of.run(memo).map(_._1)
         opt(fingerprint(ma, Fingerprint("keyed"))(fp))
+      case Named(inner, name) =>
+        memo.runNamed(name)(inner.run(memo))
       case Cached(other, ser) =>
         opt(deepFlatten(0, other, ser)(monadError.pure))
     }
@@ -118,6 +127,9 @@ sealed trait Build[M[_], A] {
   final def keyByM[B](fn: A => M[B])(implicit fp: HasFingerprint[M, B], m: Monad[M]): Build[M, A] =
     toKey(fp.onM(fn))
 
+  final def named(name: String): Build[M, A] =
+    Named(this, name)
+
   final def next[B: Serialization](fn: Spore[A, M[B]]): Build[M, B] =
     Flatten[M, B](Apply[M, A, M[B]](Build.mod[M].keyFn(fn), this)).cached
 
@@ -132,7 +144,10 @@ sealed trait Build[M[_], A] {
       case Flatten(nested) => Flatten(nested.transform(f).map { ma => f(ma) })
       case Cached(inner, ser) => Cached(inner.transform(f), ser)
       case Keyed(inner, fp) => Keyed(inner.transform(f), fp.transform(f))
+      case Named(inner, name) => Named(inner.transform(f), name)
     }
+
+
 }
 
 object Build {
@@ -150,12 +165,16 @@ object Build {
   case class Flatten[M[_], A](nested: Build[M, M[A]]) extends Build[M, A]
   case class Cached[M[_], A](b: Build[M, A], ser: Serialization[A]) extends Build[M, A]
   case class Keyed[M[_], A](b: Build[M, A], fp: HasFingerprint[M, A]) extends Build[M, A]
+  case class Named[M[_], A](b: Build[M, A], name: String) extends Build[M, A]
 
   implicit def app[M[_]]: Applicative[({type B[T] = Build[M, T]})#B] =
     new Applicative[({type B[T] = Build[M, T]})#B] {
       def pure[A](a: A): Build[M, A] = Pure(a)
       def ap[A, B](fn: Build[M, A => B])(a: Build[M, A]): Build[M, B] =
         Apply(fn, a)
+
+      // TODO: override product keep HasFingerprint and Serialization around
+      // override def product[A, B](a: Build[M, A], b: Build[M, B]): Build[M, (A, B)] =
     }
 
 
@@ -185,12 +204,13 @@ object Build {
     def sources(files: Set[String])(implicit me: MonadError[M, Throwable]): Build[M, Set[File]] =
       files.toList.traverseU(source(_)).map(_.toSet)
 
-    def roots(b: Build[M, _]): List[_] = b match {
-      case Pure(a) => List(a)
-      case Apply(fn, a) => roots(fn) ++ roots(a)
-      case Flatten(nested) => roots(nested)
-      case Cached(b, _) => roots(b)
-      case Keyed(of, _) => roots(of)
+    def dependencies(b: Build[M, _]): List[String] = b match {
+      case Pure(a) => Nil
+      case Apply(fn, a) => dependencies(fn) ++ dependencies(a)
+      case Flatten(nested) => dependencies(nested)
+      case Cached(b, _) => dependencies(b)
+      case Keyed(of, _) => dependencies(of)
+      case Named(inner, name) => name :: dependencies(inner)
     }
   }
 }

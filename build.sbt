@@ -22,7 +22,7 @@ lazy val hyperbuildSettings = Seq(
     "-Xfatal-warnings",
     "-Xlint",
     "-Yno-adapted-args",
-    "-Ywarn-dead-code",
+    //"-Ywarn-dead-code", // destroys some uses of ??? or Nothing
     "-Ywarn-numeric-widen",
     "-Ywarn-value-discard",
     "-Ywarn-unused-import",
