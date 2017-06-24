@@ -4,7 +4,6 @@ import cats._
 import cats.implicits._
 import java.io.File
 import scala.spores._
-import com.twitter.bijection.JavaSerializationInjection
 
 sealed trait Build[M[_], A] {
   import Build.{Apply, Flatten, Keyed, Cached, Pure, Named}
@@ -190,10 +189,8 @@ object Build {
     def key[A](a: A)(implicit fp: HasFingerprint[M, A]): Build[M, A] =
       Pure(a).toKey
 
-    def keyFn[A, B](fn: Spore[A, B]): Build[M, A => B] = {
-      val ser = new JavaSerializationInjection(fn.getClass.asInstanceOf[Class[Spore[A, B]]])
-      app[M].widen(key(fn)(HasFingerprint.fromSer(ser)))
-    }
+    def keyFn[A, B](fn: Spore[A, B]): Build[M, A => B] =
+      app[M].widen(key(fn)(HasFingerprint.serializable[M, Spore[A, B]]))
 
     def failed[A, E](error: E)(implicit m: MonadError[M, E]): Build[M, A] =
       pureM(m.raiseError(error))

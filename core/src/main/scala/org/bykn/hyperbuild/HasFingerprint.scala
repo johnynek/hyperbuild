@@ -1,7 +1,9 @@
 package org.bykn.hyperbuild
 
+import com.twitter.bijection.JavaSerializationInjection
 import cats.{~>, Applicative, Monad, MonadError}
 import java.io.File
+import scala.reflect.ClassTag
 
 sealed abstract class HasFingerprint[M[_], A] { self =>
   def fingerprint(a: A)(implicit app: Applicative[M]): M[Fingerprint]
@@ -35,6 +37,14 @@ object HasFingerprint extends HasFingerprint0 {
 
   implicit def fileFingerPrint[M[_]](implicit me: MonadError[M, Throwable]): HasFingerprint[M, File] =
     fromM(Fingerprint.fromFile[M](_))
+
+  /**
+   * this serializes the item using java serialization and uses the hash
+   */
+  def serializable[M[_], A <: Serializable: ClassTag]: HasFingerprint[M, A] = {
+    val ser = JavaSerializationInjection[A]
+    HasFingerprint.fromSer(ser)
+  }
 }
 
 private[hyperbuild] abstract class HasFingerprint0 {

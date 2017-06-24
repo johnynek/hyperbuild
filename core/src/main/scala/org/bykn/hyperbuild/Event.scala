@@ -112,6 +112,8 @@ object Event {
         .map { case (ts, t) => (ts.delta(delta), t) }
   }
 
+  implicit def eventFingerprint[M[_], T]: HasFingerprint[M, Event[T]] = ???
+
   implicit def eventFunctorFilter: FunctorFilter[Event] = new FunctorFilter[Event] {
     def mapFilter[A, B](ev: Event[A])(fn: A => Option[B]) = ev.optionMap(fn)
     def map[A, B](ev: Event[A])(fn: A => B) = ev.map(fn)

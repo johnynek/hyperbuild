@@ -2,7 +2,6 @@ package org.bykn.hyperbuild
 
 import org.scalatest.FunSuite
 import cats.effect.IO
-//import cats.implicits._
 
 import scala.spores._
 import IOModule.{ key }
