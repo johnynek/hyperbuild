@@ -1,7 +1,7 @@
 package org.bykn.hyperbuild
 
 import com.twitter.bijection.JavaSerializationInjection
-import cats.{~>, Applicative, Monad, MonadError}
+import cats.{~>, Applicative, Functor, Monad, MonadError}
 import java.io.File
 import scala.reflect.ClassTag
 
@@ -10,6 +10,7 @@ sealed abstract class HasFingerprint[M[_], A] { self =>
   def on[B](fn: B => A): HasFingerprint[M, B]
   def onM[B](fn: B => M[A])(implicit M: Monad[M]): HasFingerprint[M, B]
   def transform[N[_]](nt: M ~> N): HasFingerprint[N, A]
+  def andThen(fp: Fingerprint => Fingerprint)(implicit M: Functor[M]): HasFingerprint[M, A]
 }
 
 object HasFingerprint extends HasFingerprint0 {
@@ -19,6 +20,8 @@ object HasFingerprint extends HasFingerprint0 {
     def onM[B](bma: B => M[A])(implicit M: Monad[M]) = FromFnM { b: B => M.flatMap(bma(b))(fn) }
     def transform[N[_]](nt: M ~> N): HasFingerprint[N, A] =
       FromFnM(fn.andThen(nt[Fingerprint]))
+    def andThen(fp: Fingerprint => Fingerprint)(implicit M: Functor[M]): HasFingerprint[M, A] =
+      FromFnM { a => M.map(fn(a))(fp) }
   }
 
   private case class FromFn[M[_], A](fn: A => Fingerprint) extends HasFingerprint[M, A] {
@@ -27,6 +30,8 @@ object HasFingerprint extends HasFingerprint0 {
     def onM[B](bma: B => M[A])(implicit M: Monad[M]) = FromFnM { b: B => M.map(bma(b))(fn) }
     def transform[N[_]](nt: M ~> N): HasFingerprint[N, A] =
       FromFn[N, A](fn)
+    def andThen(fp: Fingerprint => Fingerprint)(implicit M: Functor[M]): HasFingerprint[M, A] =
+      FromFn(fn.andThen(fp))
   }
 
   def fromM[M[_], A](fn: A => M[Fingerprint]): HasFingerprint[M, A] =

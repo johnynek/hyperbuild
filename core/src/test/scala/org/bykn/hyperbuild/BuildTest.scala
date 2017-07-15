@@ -4,7 +4,7 @@ import org.scalatest.FunSuite
 import cats.effect.IO
 
 import scala.spores._
-import IOModule.{ key }
+import IOModule.{ const }
 
 object Mutable extends java.io.Serializable {
   var evilBuilds: Int = 0
@@ -14,10 +14,10 @@ object Mutable extends java.io.Serializable {
  * for compile time safety)
  */
 object Examples {
-  val forty2 = key(42)
+  val forty2 = const(42)
     .mapCached(spore { _ * 42 })
 
-  val evil = key(42)
+  val evil = const(42)
     .cached
     .mapCached(spore {
       val ex = Mutable

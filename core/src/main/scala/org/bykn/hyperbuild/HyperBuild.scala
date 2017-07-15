@@ -7,7 +7,7 @@ sealed trait HyperBuild[M[_], T] {
   import HyperBuild.{Evented, Fold, Ap, Flatten}
 
   // Return the most recent event and the build at that time
-  def at(t: Timestamp, memo: Memo[M]): (Option[Timestamp], M[(T, Option[Fingerprint])])
+  def at(t: Timestamp, memo: Memo[M]): (Option[Timestamp], M[(T, Fingerprint)])
 
   final def foldLeftM[U](init: Build[M, U])(fn: (U, T) => M[U]): HyperBuild[M, U] =
     Fold(init, this, fn)
@@ -38,7 +38,7 @@ object HyperBuild {
   }
 
   private case class Fold[M[_], A, B](init: Build[M, A], changes: HyperBuild[M, B], fn: (A, B) => M[A]) extends HyperBuild[M, A] {
-    def at(t: Timestamp, memo: Memo[M]): (Option[Timestamp], M[(A, Option[Fingerprint])]) = {
+    def at(t: Timestamp, memo: Memo[M]): (Option[Timestamp], M[(A, Fingerprint)]) = {
       import memo.monadError
 
       def aser: Serialization[A] = ???
@@ -49,7 +49,7 @@ object HyperBuild {
         val (prev, mbf) = changes.at(ts, memo)
 
         val mb: M[B] = mbf.map(_._1)
-        val bfp: M[Option[Fingerprint]] = mbf.map(_._2)
+        val bfp: M[Fingerprint] = mbf.map(_._2)
 
         prev match {
           case None =>
@@ -65,12 +65,14 @@ object HyperBuild {
       }
 
       val (opt, ma) = loop(t)
-      (opt, ma.map((_, Option.empty[Fingerprint]))) // TODO put a correct fingerprint here
+      // TODO put a correct fingerprint here
+      val fp: Fingerprint = ???
+      (opt, ma.map((_, fp)))
     }
   }
 
   private case class Evented[M[_], T, U](ev: Event[T], init: Build[M, U], fn: T => Build[M, U]) extends HyperBuild[M, U] {
-    def at(t: Timestamp, memo: Memo[M]): (Option[Timestamp], M[(U, Option[Fingerprint])]) =
+    def at(t: Timestamp, memo: Memo[M]): (Option[Timestamp], M[(U, Fingerprint)]) =
       ev.mostRecent(t) match {
         case Some((ts, t)) => (Some(ts), fn(t).run(memo))
         case None => (None, init.run(memo))
@@ -78,14 +80,12 @@ object HyperBuild {
   }
 
   private case class Flatten[M[_], A](hb: HyperBuild[M, M[A]]) extends HyperBuild[M, A] {
-    def at(t: Timestamp, memo: Memo[M]): (Option[Timestamp], M[(A, Option[Fingerprint])]) = {
+    def at(t: Timestamp, memo: Memo[M]): (Option[Timestamp], M[(A, Fingerprint)]) = {
       val (ts, mma) = hb.at(t, memo)
-      // TODO maybe smart memoization here
       import memo.monadError
-      (ts, mma.flatMap { case (ma, optFP) =>
-        // TODO, we can probably compute the fingerprint of a in some smart way
-        // maybe just hashing the string "flatten" with a.
-        ma.map { a => (a, Option.empty) }
+      (ts, mma.flatMap { case (ma, fp) =>
+        // TODO follow the same approach as Build.Flatten wrt to Fingerprinting a flatten
+        ???
       })
     }
   }
@@ -93,7 +93,7 @@ object HyperBuild {
   implicit def hyperBuildApplicative[M[_]]: Applicative[({type A[T] = HyperBuild[M, T]})#A] =
     new Applicative[({type A[T] = HyperBuild[M, T]})#A] {
       def pure[A](a: A): HyperBuild[M, A] =
-        HyperBuild.const(Build.mod[M].pure(a))
+        HyperBuild.const(Build.mod[M].const(a.asInstanceOf[A with Serializable])(HasFingerprint.serializable))
       def ap[A, B](fn: HyperBuild[M, A => B])(a: HyperBuild[M, A]): HyperBuild[M, B] =
         Ap(fn, a)
     }
@@ -102,7 +102,7 @@ object HyperBuild {
     fn: HyperBuild[M, A => B],
     a: HyperBuild[M, A]) extends HyperBuild[M, B] {
 
-    def at(t: Timestamp, memo: Memo[M]): (Option[Timestamp], M[(B, Option[Fingerprint])]) = {
+    def at(t: Timestamp, memo: Memo[M]): (Option[Timestamp], M[(B, Fingerprint)]) = {
       import memo.monadError
       val (tsa, mfn) = fn.at(t, memo)
       val (tsb, ma) = a.at(t, memo)
@@ -111,7 +111,7 @@ object HyperBuild {
       val bc = mfn.map(_._1).ap(ma.map(_._1))
 
       // TODO add a fingerprint
-      (tsc, bc.map { b => (b, None) })
+      (tsc, bc.map { b => (b, ???) })
     }
   }
 }
