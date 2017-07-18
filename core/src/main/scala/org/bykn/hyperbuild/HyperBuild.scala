@@ -24,7 +24,10 @@ object HyperBuild {
   def evented[M[_], U](ev: Event, init: Build[M, U])(fn: Build[M, Timestamp => U]): HyperBuild[M, U] =
     Evented(ev, init, fn)
 
-  def const[M[_], T](b: Build[M, T]): HyperBuild[M, T] =
+  def eventedM[M[_], U](ev: Event, init: Build[M, M[U]])(fn: Build[M, Timestamp => M[U]]): HyperBuild[M, U] =
+    evented(ev, init)(fn).flatten
+
+  implicit def const[M[_], T](b: Build[M, T]): HyperBuild[M, T] =
     Const(b)
 
   implicit final class InvariantHyperBuild[M[_], A](val build: HyperBuild[M, A]) extends AnyVal {
@@ -109,6 +112,8 @@ object HyperBuild {
   implicit class HyperBuildApply[M[_], A, B](val build: HyperBuild[M, A => B]) extends AnyVal {
     def apply(hb: HyperBuild[M, A])(implicit ser: Serialization[B]): HyperBuild[M, B] =
       Ap(build, hb, ser)
+    def apply(hb: Build[M, A])(implicit ser: Serialization[B]): HyperBuild[M, B] =
+      Ap(build, Const(hb), ser)
   }
 
   implicit class HyperBuildM[M[_], A](val build: HyperBuild[M, M[A]]) extends AnyVal {

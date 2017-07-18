@@ -3,7 +3,7 @@ package org.bykn.hyperbuild
 import cats.Monoid
 
 sealed trait Event {
-  import Event.{Cutover, Merge, LookBack}
+  import Event.{Cutover, Empty, Merge, LookBack}
   /**
    * return the most recent value strictly before the exUpper and
    * optionally greater than or equal to lower. The fingerprint
@@ -12,7 +12,14 @@ sealed trait Event {
   def mostRecent(lower: Option[Timestamp], exUpper: Timestamp): (Option[Timestamp], Fingerprint)
 
   def merge(that: Event): Event =
-    Merge(this, that)
+    that match {
+      case Empty => this
+      case notEmptyThat =>
+        this match {
+          case Empty => notEmptyThat
+          case notEmptyThis => Merge(notEmptyThis, notEmptyThat)
+        }
+    }
 
   /**
    * At and after a given timestamp, cutover to a new
@@ -43,18 +50,29 @@ object Event {
   }
 
   private case class Merge(left: Event, right: Event) extends Event {
-    def mostRecent(lower: Option[Timestamp], exUpper: Timestamp) = {
-      val (optl, l) = left.mostRecent(lower, exUpper)
-      val (optr, r) = right.mostRecent(lower, exUpper)
-      def newFP = Fingerprint.combineAll((l :: r :: Nil).sortBy(_.toS))
-      (optl, optr) match {
-        case (None, right) => (right, newFP)
-        case (left, None) => (left, newFP)
-        case (lsome@Some(leftTs), rsome@Some(rightTs)) =>
-          val cmp = leftTs.secondsSinceEpoch.compareTo(rightTs.secondsSinceEpoch)
-          if (cmp >= 0) (lsome, newFP)
-          else (rsome, newFP)
+    private lazy val flatten: Set[Event] = {
+
+      def loop(node: Event, toVisit: List[Event], processed: Set[Event]): Set[Event] = node match {
+        case Merge(l, r) if processed(l) => loop(r, toVisit, processed)
+        case Merge(l, r) => loop(r, l :: toVisit, processed)
+        case other => toVisit match {
+          case Nil => processed + other
+          case h :: tail => loop(h, tail, processed + other)
+        }
       }
+      loop(this, Nil, Set.empty)
+    }
+
+    def mostRecent(lower: Option[Timestamp], exUpper: Timestamp) = {
+      val allItems = flatten.map(_.mostRecent(lower, exUpper))
+      val (maxTime, _) = allItems.maxBy(_._1)
+      val collisionSet: Set[Fingerprint] = allItems.collect { case (t, fp) if t == maxTime => fp }
+      val collisions = collisionSet.toList.sortBy(_.toS)
+      val fp = collisions match {
+        case h :: Nil => h
+        case nonSingle => Fingerprint.combineAll(nonSingle)
+      }
+      (maxTime, fp)
     }
   }
 
@@ -86,8 +104,7 @@ object Event {
         if (floor(exUpper) == exUpper.secondsSinceEpoch) Timestamp(recentTs - period)
         else Timestamp(recentTs)
 
-      val cycles = (exUpper.secondsSinceEpoch / period) - (lower.fold(Int.MinValue)(_.secondsSinceEpoch) / period)
-      (Some(resTs), Fingerprint.combine(Fingerprint(s"Event.Periodic($period)"), Fingerprint(cycles.toString)))
+      (Some(resTs), Fingerprint.combine(Fingerprint("Event.Periodic"), Fingerprint(s"($period, $lower, $exUpper)")))
     }
   }
 
