@@ -33,6 +33,7 @@ object Fingerprint {
     hash(_.update(ser(a)))
 
   def ofBytes(bs: Array[Byte]): Fingerprint = hash(_.update(bs))
+  def ofString(str: String): Fingerprint = ofBytes(str.getBytes("utf-8"))
 
   def fromFile[M[_]](f: File)(implicit M: MonadError[M, Throwable]): M[Fingerprint] =
     M.catchNonFatal(hash { fn =>

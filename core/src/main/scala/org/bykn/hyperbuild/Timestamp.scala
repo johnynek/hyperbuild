@@ -14,4 +14,7 @@ object Timestamp {
     new Semigroup[Timestamp] {
       def combine(a: Timestamp, b: Timestamp) = Timestamp(a.secondsSinceEpoch max b.secondsSinceEpoch)
     }
+
+  implicit def hasFingerprint[M[_]]: HasFingerprint[M, Timestamp] =
+    HasFingerprint.from[M, Timestamp] { case Timestamp(s) => Fingerprint.combine(Fingerprint("Timestamp"), Fingerprint(s.toString)) }
 }

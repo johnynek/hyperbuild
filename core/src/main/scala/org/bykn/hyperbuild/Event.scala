@@ -1,127 +1,106 @@
 package org.bykn.hyperbuild
 
-import cats.{FunctorFilter, Semigroup, Monoid}
+import cats.Monoid
 
-sealed trait Event[T] {
-  import Event.{Cutover, OptMapped, Merge, LookBack}
-  // return the most recent value before the given Timestamp
-  def mostRecent(t: Timestamp): Option[(Timestamp, T)]
+sealed trait Event {
+  import Event.{Cutover, Merge, LookBack}
+  /**
+   * return the most recent value strictly before the exUpper and
+   * optionally greater than or equal to lower. The fingerprint
+   * should only cover the included interval
+   */
+  def mostRecent(lower: Option[Timestamp], exUpper: Timestamp): (Option[Timestamp], Fingerprint)
 
-  def withTimestampOptionMap[U](fn: (Timestamp, T) => Option[U]): Event[U] =
-    OptMapped[T, U](this, fn)
-
-  def merge(that: Event[T])(implicit semi: Semigroup[T]): Event[T] =
-    Merge(this, that, semi)
-
-  def withTimestamp: Event[(Timestamp, T)] =
-    withTimestampOptionMap { (ts, t) => Some((ts, t)) }
+  def merge(that: Event): Event =
+    Merge(this, that)
 
   /**
    * At and after a given timestamp, cutover to a new
    * event stream
    */
-  def cutover(at: Timestamp, to: Event[T]): Event[T] =
+  def cutover(at: Timestamp, to: Event): Event =
     Cutover(at, this, to)
-
-  def optionMap[U](fn: T => Option[U]): Event[U] =
-    withTimestampOptionMap[U]((_, t) => fn(t))
-
-  def map[U](fn: T => U): Event[U] =
-    optionMap(fn.andThen(Some(_)))
-
-  def filter(fn: T => Boolean): Event[T] =
-    optionMap { t => if (fn(t)) Some(t) else None }
 
   /**
    * look back a number of seconds
    */
-  def lookBack(seconds: Int): Event[T] =
+  def lookBack(seconds: Int): Event =
     LookBack(this, seconds)
 }
 
 object Event {
 
-  def empty[A]: Event[A] = Empty[A]()
-  def everySeconds(period: Int): Event[Timestamp] =
-    Periodic(period).withTimestampOptionMap { (ts, _) => Some(ts) }
+  def empty: Event = Empty
+  def everySeconds(period: Int): Event =
+    Periodic(period)
 
-  val hourly: Event[Timestamp] = everySeconds(60 * 60)
-  val daily: Event[Timestamp] = everySeconds(60 * 60 * 24)
+  val hourly: Event = everySeconds(60 * 60)
+  val daily: Event = everySeconds(60 * 60 * 24)
 
-  private case class Empty[A]() extends Event[A] {
-    def mostRecent(t: Timestamp) = None
+  private case object Empty extends Event {
+    def mostRecent(lower: Option[Timestamp], exUpper: Timestamp) =
+      (None, Fingerprint.combineAll(Fingerprint("Event.empty") :: Nil))
   }
 
-  private case class Merge[A](left: Event[A], right: Event[A], semigroup: Semigroup[A]) extends Event[A] {
-    def mostRecent(t: Timestamp) =
-      (left.mostRecent(t), right.mostRecent(t)) match {
-        case (None, right) => right
-        case (left, None) => left
-        case (lsome@Some((leftTs, leftA)), rsome@Some((rightTs, rightA))) =>
+  private case class Merge(left: Event, right: Event) extends Event {
+    def mostRecent(lower: Option[Timestamp], exUpper: Timestamp) = {
+      val (optl, l) = left.mostRecent(lower, exUpper)
+      val (optr, r) = right.mostRecent(lower, exUpper)
+      def newFP = Fingerprint.combineAll((l :: r :: Nil).sortBy(_.toS))
+      (optl, optr) match {
+        case (None, right) => (right, newFP)
+        case (left, None) => (left, newFP)
+        case (lsome@Some(leftTs), rsome@Some(rightTs)) =>
           val cmp = leftTs.secondsSinceEpoch.compareTo(rightTs.secondsSinceEpoch)
-          if (cmp == 0) Some((leftTs, semigroup.combine(leftA, rightA)))
-          else if (cmp > 0) lsome // left is most recent
-          else rsome
+          if (cmp >= 0) (lsome, newFP)
+          else (rsome, newFP)
       }
-  }
-
-  private case class OptMapped[T, U](ev: Event[T], fn: (Timestamp, T) => Option[U]) extends Event[U] {
-    def mostRecent(t: Timestamp) = {
-      @annotation.tailrec
-      def go(ts: Timestamp): Option[(Timestamp, U)] =
-        ev.mostRecent(ts) match {
-          case None        => None // explicit flatMap to get tailRec
-          case Some((at, t)) =>
-            fn(at, t) match {
-              case Some(u) => Some((at, u))
-              case None    => go(at) // back track more
-            }
-        }
-
-      go(t)
     }
   }
 
-  private case class Cutover[T](at: Timestamp, before: Event[T], onAfter: Event[T]) extends Event[T] {
-    def mostRecent(t: Timestamp): Option[(Timestamp, T)] =
-      if (t.secondsSinceEpoch <= at.secondsSinceEpoch) before.mostRecent(t)
+  private case class Cutover(at: Timestamp, before: Event, onAfter: Event) extends Event {
+    def mostRecent(lower: Option[Timestamp], exUpper: Timestamp) = {
+      if (exUpper.secondsSinceEpoch < at.secondsSinceEpoch) before.mostRecent(lower, exUpper)
       else {
-        onAfter.mostRecent(t) match {
-          case s@Some((ts, _)) if ts.secondsSinceEpoch >= at.secondsSinceEpoch => s
-          case _ =>
-            // maybe there is something before:
-            before.mostRecent(at)
+        val bef@(optTsB, fpB) = before.mostRecent(lower, at)
+        val aft@(optTsA, fpA) = onAfter.mostRecent(Some(at), exUpper)
+        optTsA match {
+          case None =>
+            // there is actually no event in the onAfter region
+            bef
+          case some =>
+            // need to combine the fingerprints
+            (some, Fingerprint.combine(fpB, fpA))
         }
+      }
     }
   }
 
-  private case class Periodic(period: Int) extends Event[Unit] {
-    def mostRecent(t: Timestamp): Option[(Timestamp, Unit)] = {
-      val recentTs = (t.secondsSinceEpoch / period) * period
+  private case class Periodic(period: Int) extends Event {
+    def mostRecent(lower: Option[Timestamp], exUpper: Timestamp) = {
+      def floor(t: Timestamp): Int = (t.secondsSinceEpoch / period) * period
+
+      val recentTs = floor(exUpper)
+      val optLower = lower.map(floor)
       val resTs =
-        if (recentTs == t.secondsSinceEpoch) Timestamp(recentTs - period)
+        if (floor(exUpper) == exUpper.secondsSinceEpoch) Timestamp(recentTs - period)
         else Timestamp(recentTs)
 
-      Some((resTs, ()))
+      val cycles = (exUpper.secondsSinceEpoch / period) - (lower.fold(Int.MinValue)(_.secondsSinceEpoch) / period)
+      (Some(resTs), Fingerprint.combine(Fingerprint(s"Event.Periodic($period)"), Fingerprint(cycles.toString)))
     }
   }
 
-  private case class LookBack[T](of: Event[T], delta: Int) extends Event[T] {
-    def mostRecent(t: Timestamp) =
-      of.mostRecent(t.delta(-delta))
-        .map { case (ts, t) => (ts.delta(delta), t) }
+  private case class LookBack(of: Event, delta: Int) extends Event {
+    def mostRecent(lower: Option[Timestamp], exUpper: Timestamp) = {
+      val (opt, fp) = of.mostRecent(lower.map(_.delta(-delta)), exUpper.delta(-delta))
+      (opt.map(_.delta(delta)), Fingerprint.combine(Fingerprint(s"Event.Lookback(_, $delta)"), fp))
+    }
   }
 
-  implicit def eventFingerprint[M[_], T]: HasFingerprint[M, Event[T]] = ???
-
-  implicit def eventFunctorFilter: FunctorFilter[Event] = new FunctorFilter[Event] {
-    def mapFilter[A, B](ev: Event[A])(fn: A => Option[B]) = ev.optionMap(fn)
-    def map[A, B](ev: Event[A])(fn: A => B) = ev.map(fn)
-  }
-
-  implicit def eventMonoid[A: Semigroup]: Monoid[Event[A]] = new Monoid[Event[A]] {
-    def empty = Empty[A]()
-    def combine(l: Event[A], r: Event[A]) = l.merge(r)
+  implicit val eventMonoid: Monoid[Event] = new Monoid[Event] {
+    def empty = Empty
+    def combine(l: Event, r: Event) = l.merge(r)
   }
 }
 

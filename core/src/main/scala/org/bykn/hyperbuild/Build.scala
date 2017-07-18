@@ -17,6 +17,12 @@ sealed trait Build[M[_], +A] {
   final def next[B: Serialization](fn: Spore[A, M[B]]): Build[M, B] =
     Flatten[M, B](Apply[M, A, M[B]](Build.mod[M].const(fn)(HasFingerprint.serializable), this)).cached
 
+  final def zip[B](that: Build[M, B]): Build[M, (A, B)] = {
+    import Build.mod
+    val withB = mod[M].const(Build.ZipFn[A, B]())(HasFingerprint.serializable)
+    Apply(Apply(withB, this), that)
+  }
+
   /**
    * Transform to a new Monad N
    */
@@ -31,6 +37,16 @@ sealed trait Build[M[_], +A] {
 }
 
 object Build {
+
+  /**
+   * Some private serializable and stable functions
+   */
+  private case class ZipFn[A, B]() extends Function1[A, B => (A, B)] with Serializable {
+    def apply(a: A) = { (b: B) => (a, b) }
+  }
+  private case class AndThen[A, B, C]() extends Function1[(A => B, B => C), A => C] with Serializable {
+    def apply(fns: (A => B, B => C)): A => C = fns._1.andThen(fns._2)
+  }
 
   implicit class BuildInvariant[M[_], A](val build: Build[M, A]) extends AnyVal {
     final def cached(implicit ser: Serialization[A]): Build[M, A] = build match {
@@ -115,14 +131,22 @@ object Build {
   }
 
   implicit class BuildFn[M[_], A, B](val fn: Build[M, A => B]) extends AnyVal {
-    def ap(a: Build[M, A]): Build[M, B] = Apply(fn, a)
+    def apply(a: Build[M, A]): Build[M, B] = Apply(fn, a)
+    def apply(a: A)(implicit hfp: HasFingerprint[M, A]): Build[M, B] =
+      apply(Const(a, hfp))
+
+    def andThen[C](bfn: Build[M, B => C]): Build[M, A => C] =
+      Apply(Const(AndThen[A, B, C](), HasFingerprint.serializable), fn.zip(bfn))
   }
 
-  case class Apply[M[_], A, B](fn: Build[M, A => B], a: Build[M, A]) extends Build[M, B]
-  case class Cached[M[_], A](b: Build[M, A], ser: Serialization[A]) extends Build[M, A]
-  case class Const[M[_], A](const: A, fp: HasFingerprint[M, A]) extends Build[M, A]
-  case class Flatten[M[_], A](nested: Build[M, M[A]]) extends Build[M, A]
-  case class Named[M[_], A](b: Build[M, A], name: String) extends Build[M, A]
+  private case class Apply[M[_], A, B](fn: Build[M, A => B], a: Build[M, A]) extends Build[M, B]
+  private case class Cached[M[_], A](b: Build[M, A], ser: Serialization[A]) extends Build[M, A]
+  private case class Const[M[_], A](const: A, fp: HasFingerprint[M, A]) extends Build[M, A]
+  // TODO: adding ApplyM[M[_], A, B](fn: Build[M, A => M[B]], a: Build[M, A]) extends Build[M, B]
+  // seems strictly stronger than this since it allows us to implement Build[M, A => M[B]] =>
+  // Build[M, A => B] which we can't seem to do now
+  private case class Flatten[M[_], A](nested: Build[M, M[A]]) extends Build[M, A]
+  private case class Named[M[_], A](b: Build[M, A], name: String) extends Build[M, A]
 
   /**
    * Note, map and pure assume serializable. Kind of junky... sorry
@@ -145,6 +169,9 @@ object Build {
 
   final class Module[M[_]] {
 
+    val None: Build[M, Option[Nothing]] =
+      const(scala.None)(HasFingerprint.serializable)
+
     def const[A](a: A)(implicit hfp: HasFingerprint[M, A]): Build[M, A] =
       Const[M, A](a, hfp)
 
@@ -152,6 +179,9 @@ object Build {
       val hfma = hfp.onM[M[A]](identity[M[A]] _).andThen(flattenFP(_, 1))
       Flatten(Const(ma, hfma))
     }
+
+    def fn[A, B](s: Spore[A, B]): Build[M, A => B] =
+      const(s)(HasFingerprint.serializable)
 
     def failed[E](error: E)(implicit m: MonadError[M, E]): Build[M, Nothing] = {
       val hfp = HasFingerprint.fromM[M, Nothing](_ => m.raiseError(error))

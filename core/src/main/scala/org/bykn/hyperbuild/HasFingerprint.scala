@@ -34,6 +34,9 @@ object HasFingerprint extends HasFingerprint0 {
       FromFn(fn.andThen(fp))
   }
 
+  def fingerprint[M[_]: Applicative, A](a: A)(implicit hfp: HasFingerprint[M, A]): M[Fingerprint] =
+    hfp.fingerprint(a)
+
   def fromM[M[_], A](fn: A => M[Fingerprint]): HasFingerprint[M, A] =
     FromFnM(fn)
 
@@ -43,6 +46,17 @@ object HasFingerprint extends HasFingerprint0 {
   implicit def fileFingerPrint[M[_]](implicit me: MonadError[M, Throwable]): HasFingerprint[M, File] =
     fromM(Fingerprint.fromFile[M](_))
 
+  implicit def optionHasFingerprint[M[_], A](implicit app: Applicative[M], hfpa: HasFingerprint[M, A]): HasFingerprint[M, Option[A]] =
+    hfpa match {
+      case FromFn(fn) => FromFn[M, Option[A]] {
+        case None => Fingerprint.ofString("scala.None")
+        case Some(a) => Fingerprint.combine(Fingerprint("scala.Some"), fn(a))
+      }
+      case FromFnM(fn) => FromFnM[M, Option[A]] {
+        case None => app.pure(Fingerprint.ofString("scala.None"))
+        case Some(a) => app.map(fn(a))(Fingerprint.combine(Fingerprint("scala.Some"), _))
+      }
+    }
   /**
    * this serializes the item using java serialization and uses the hash
    */
