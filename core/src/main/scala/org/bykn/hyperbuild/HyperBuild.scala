@@ -9,12 +9,12 @@ sealed trait HyperBuild[M[_], +T] {
   final def foldLeftM[U: Serialization](init: Build[M, U])(fn: Build[M, ((U, T)) => M[U]]): HyperBuild[M, U] =
     Fold[M, U, T](init, this, fn, implicitly)
 
-  final def lookBack(delta: Int): HyperBuild[M, T] = this match {
-    case Ap(fn, a, ser) => Ap(fn.lookBack(delta), a.lookBack(delta), ser)
+  final def shift(delta: Int): HyperBuild[M, T] = this match {
+    case Ap(fn, a, ser) => Ap(fn.shift(delta), a.shift(delta), ser)
     case Const(t) => Const(t)
-    case Evented(ev, init, fn) => Evented(ev.lookBack(delta), init, fn)
-    case Flatten(ma) => Flatten(ma.lookBack(delta))
-    case Fold(init, changes, fn, ser) => Fold(init, changes.lookBack(delta), fn, ser)
+    case Evented(ev, init, fn) => Evented(ev.shift(delta), init, fn)
+    case Flatten(ma) => Flatten(ma.shift(delta))
+    case Fold(init, changes, fn, ser) => Fold(init, changes.shift(delta), fn, ser)
   }
 
 }
