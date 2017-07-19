@@ -43,6 +43,9 @@ object HasFingerprint extends HasFingerprint0 {
   def from[M[_], A](fn: A => Fingerprint): HasFingerprint[M, A] =
     FromFn(fn)
 
+  implicit def nothingHasFingerprint[M[_]]: HasFingerprint[M, Nothing] =
+    from[M, Nothing] { n: Nothing => n }
+
   implicit def fileFingerPrint[M[_]](implicit me: MonadError[M, Throwable]): HasFingerprint[M, File] =
     fromM(Fingerprint.fromFile[M](_))
 

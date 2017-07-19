@@ -47,10 +47,7 @@ object HyperBuild {
           val res = (mfn, ma)
             .map2 { case ((fn, ffn), (in, fa)) =>
               val fp = Fingerprint.combineAll(Fingerprint("apply") :: ffn :: fa :: Nil)
-              memo.getOrElseUpdate[A](fp, ser)(monadError.pure(fn(in)))
-                .map { case (a, _) =>
-                  (a, fp)
-                }
+              memo.getOrElseUpdate[A](fp, ser)(monadError.pure(fn(in))).map((_, fp))
             }
             .flatten
           (tsc, res)
@@ -93,7 +90,7 @@ object HyperBuild {
                       }
                   }
                 }
-                .map { case (a, _) => (a, fp) } // discard the fingerprint
+                .map((_, fp))
               }
               .flatten
 

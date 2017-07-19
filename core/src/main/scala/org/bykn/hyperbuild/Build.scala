@@ -9,17 +9,16 @@ sealed trait Build[M[_], +A] {
   import Build.{Apply, Flatten, Cached, Const, Named}
 
   final def mapCached[B: Serialization](fn: Spore[A, B]): Build[M, B] =
-    Apply(Build.mod[M].const(fn)(HasFingerprint.serializable), this).cached
+    Apply(Build.mod[M].fn[A, B, Spore[A, B]](fn), this).cached
 
   final def named(name: String): Build[M, A] =
     Named(this, name)
 
   final def next[B: Serialization](fn: Spore[A, M[B]]): Build[M, B] =
-    Flatten[M, B](Apply[M, A, M[B]](Build.mod[M].const(fn)(HasFingerprint.serializable), this)).cached
+    Flatten[M, B](Apply[M, A, M[B]](Build.mod[M].fn[A, M[B], Spore[A, M[B]]](fn), this)).cached
 
   final def zip[B](that: Build[M, B]): Build[M, (A, B)] = {
-    import Build.mod
-    val withB = mod[M].const(Build.ZipFn[A, B]())(HasFingerprint.serializable)
+    val withB = Build.mod[M].fn[A, B => (A, B), Build.ZipFn[A, B]](Build.ZipFn[A, B]())
     Apply(Apply(withB, this), that)
   }
 
@@ -72,7 +71,7 @@ object Build {
         val ma = a.run(memo)
         mf.product(ma).flatMap { case ((fab, fabF), (a, aF)) =>
           val bF = applyFP(fabF, aF, depth)
-          memo.getOrElseUpdate(bF, ser)(lift(fab(a)))
+          memo.getOrElseUpdate(bF, ser)(lift(fab(a))).map((_, bF))
         }
       }
 
@@ -85,13 +84,11 @@ object Build {
           case Named(inner, name) =>
             memo.runNamed(name) { deepFlatten(depth, inner, ser)(fn) }
           case c@Const(_, _) =>
-            // TODO: we could cache flattened constants if requested
-            // currently we are not
             def go[T1 <: T](c: Const[M, T1]): M[(R, Fingerprint)] =
               for {
                 fp <- c.fp.fingerprint(c.const)
                 rfp = flattenFP(fp, depth)
-                r <- fn(c.const)
+                r <- memo.getOrElseUpdate(rfp, ser)(fn(c.const))
               } yield (r, rfp)
 
             go(c)
@@ -172,6 +169,16 @@ object Build {
     val None: Build[M, Option[Nothing]] =
       const(scala.None)(HasFingerprint.serializable)
 
+    def noneM[T](implicit M: Monad[M]): Build[M, M[Option[T]]] = {
+      val hfp = HasFingerprint.optionHasFingerprint[M, Nothing](M, HasFingerprint.nothingHasFingerprint)
+      val hfma = hfp
+        .onM[M[Option[Nothing]]](identity[M[Option[Nothing]]] _)
+        .andThen(flattenFP(_, 1))
+
+      // we could cast this away, since widen is an identity
+      Const(M.pure[Option[Nothing]](scala.None), hfma).asInstanceOf[Build[M, M[Option[T]]]]
+    }
+
     def const[A](a: A)(implicit hfp: HasFingerprint[M, A]): Build[M, A] =
       Const[M, A](a, hfp)
 
@@ -180,8 +187,11 @@ object Build {
       Flatten(Const(ma, hfma))
     }
 
-    def fn[A, B](s: Spore[A, B]): Build[M, A => B] =
-      const(s)(HasFingerprint.serializable)
+    def fn[A, B, T <: Function1[A, B] with Serializable](f: T): Build[M, A => B] =
+      const[Function1[A, B] with Serializable](f)(HasFingerprint.serializable[M, Function1[A, B] with Serializable])
+
+    def unsafeFn[A, B](f: A => B): Build[M, A => B] =
+      fn[A, B, Function1[A, B] with Serializable](f.asInstanceOf[Function1[A, B] with Serializable])
 
     def failed[E](error: E)(implicit m: MonadError[M, E]): Build[M, Nothing] = {
       val hfp = HasFingerprint.fromM[M, Nothing](_ => m.raiseError(error))

@@ -4,7 +4,7 @@ import org.scalatest.FunSuite
 import cats.effect.IO
 
 import scala.spores._
-import IOModule.{ const }
+import IOModule.{ const, constM }
 
 object Mutable extends java.io.Serializable {
   var evilBuilds: Int = 0
@@ -23,6 +23,8 @@ object Examples {
       val ex = Mutable
       i => ex.evilBuilds += 1; i * 42
     })
+
+  val flattened = constM(IO(42)).cached
 }
 
 class BuildTest extends FunSuite {
@@ -59,15 +61,15 @@ class BuildTest extends FunSuite {
     Mutable.evilBuilds = 0
     assertBuild(memo, Examples.evil, 42 * 42)
     assert(Mutable.evilBuilds == 1)
-    assertIO(memo.stores, 1L)
-    assertIO(memo.hits, 0L)
-    assertIO(memo.misses, 1L)
-
-    assertBuild(memo, Examples.evil, 42 * 42)
-    assert(Mutable.evilBuilds == 2)
     assertIO(memo.stores, 2L)
     assertIO(memo.hits, 0L)
     assertIO(memo.misses, 2L)
+
+    assertBuild(memo, Examples.evil, 42 * 42)
+    assert(Mutable.evilBuilds == 2)
+    assertIO(memo.stores, 3L) // only the function was invalidated
+    assertIO(memo.hits, 1L)
+    assertIO(memo.misses, 3L)
   }
 
   test("test file/IO with caching") {
@@ -83,6 +85,24 @@ class BuildTest extends FunSuite {
 
     // when we run again, we hit
     assertBuild(memo, lines, 59)
+    assertIO(memo.stores, 1L)
+    assertIO(memo.hits, 1L)
+    assertIO(memo.misses, 1L)
+
+  }
+
+  test("flattening with caching") {
+    val memo = new MemoryMemo
+
+    import Examples.flattened
+
+    assertBuild(memo, flattened, 42)
+    assertIO(memo.stores, 1L)
+    assertIO(memo.hits, 0L)
+    assertIO(memo.misses, 1L)
+
+    // when we run again, we hit
+    assertBuild(memo, flattened, 42)
     assertIO(memo.stores, 1L)
     assertIO(memo.hits, 1L)
     assertIO(memo.misses, 1L)
