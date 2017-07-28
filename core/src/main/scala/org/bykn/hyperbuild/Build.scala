@@ -6,7 +6,7 @@ import java.io.File
 import scala.spores._
 
 sealed trait Build[M[_], +A] {
-  import Build.{Apply, Flatten, Cached, Const, Named}
+  import Build.{Apply, Flatten, Cached, CachedOrBuild, Const, Named}
 
   final def mapCached[B: Serialization](fn: Spore[A, B]): Build[M, B] =
     Apply(Build.mod[M].fn[A, B, Spore[A, B]](fn), this).cached
@@ -31,6 +31,7 @@ sealed trait Build[M[_], +A] {
       case Apply(fn, a) => Apply(fn.transform(f), a.transform(f))
       case Flatten(nested) => Flatten(nested.transform(f).map { ma => f(ma) })
       case Cached(inner, ser) => Cached(inner.transform(f), ser)
+      case CachedOrBuild(fp, ser, a) => CachedOrBuild(fp, ser, () => a().transform(f))
       case Named(inner, name) => Named(inner.transform(f), name)
     }
 }
@@ -52,6 +53,9 @@ object Build {
       case Cached(of, _) =>
         // don't nest caching, but use the new serialization
         Cached(of, ser)
+      case CachedOrBuild(fp, _, a) =>
+        // don't nest caching, but use the new serialization
+        CachedOrBuild(fp, ser, a)
       case other =>
         Cached(other, ser)
     }
@@ -95,6 +99,19 @@ object Build {
           case Cached(inner, _) =>
             // The outer-most serialization wins
             deepFlatten(depth, inner, ser)(fn)
+          case cob@CachedOrBuild(_, _, _) =>
+            def go[T1 <: T](cob: CachedOrBuild[M, T1]): M[(R, Fingerprint)] = {
+
+              // This must be a def or lazy val since below it is in a call-by-name
+              def mt: M[T1] =
+                memo.getOrElseUpdate(cob.fp, cob.ser)(cob.a().cached(cob.ser).run(memo).map(_._1))
+
+              val rfp = flattenFP(cob.fp, depth)
+
+              memo.getOrElseUpdate(rfp, ser)(mt.flatMap(fn))
+                .map((_, rfp))
+            }
+            go(cob)
         }
 
       build match {
@@ -117,6 +134,9 @@ object Build {
           memo.runNamed(name)(inner.run(memo))
         case Cached(other, ser) =>
           deepFlatten(0, other, ser)(monadError.pure)
+        case CachedOrBuild(fp, sera, a) =>
+          memo.getOrElseUpdate(fp, sera)(a().cached(sera).run(memo).map(_._1))
+            .map((_, fp))
       }
     }
   }
@@ -124,7 +144,7 @@ object Build {
   implicit class BuildM[M[_], A](val build: Build[M, M[A]]) extends AnyVal {
     def flatten: Build[M, A] = Flatten(build)
     def flatCached(implicit ser: Serialization[A]): Build[M, A] =
-    Cached(Flatten(build), ser)
+      Cached(Flatten(build), ser)
   }
 
   implicit class BuildFn[M[_], A, B](val fn: Build[M, A => B]) extends AnyVal {
@@ -138,6 +158,7 @@ object Build {
 
   private case class Apply[M[_], A, B](fn: Build[M, A => B], a: Build[M, A]) extends Build[M, B]
   private case class Cached[M[_], A](b: Build[M, A], ser: Serialization[A]) extends Build[M, A]
+  private case class CachedOrBuild[M[_], A](fp: Fingerprint, ser: Serialization[A], a: () => Build[M, A]) extends Build[M, A]
   private case class Const[M[_], A](const: A, fp: HasFingerprint[M, A]) extends Build[M, A]
   // TODO: adding ApplyM[M[_], A, B](fn: Build[M, A => M[B]], a: Build[M, A]) extends Build[M, B]
   // seems strictly stronger than this since it allows us to implement Build[M, A => M[B]] =>
@@ -187,6 +208,9 @@ object Build {
       Flatten(Const(ma, hfma))
     }
 
+    private[hyperbuild] def cacheOrBuild[A](fp: Fingerprint, bld: => Build[M, A])(implicit ser: Serialization[A]): Build[M, A] =
+      CachedOrBuild(fp, ser, () => bld)
+
     def fn[A, B, T <: Function1[A, B] with Serializable](f: T): Build[M, A => B] =
       const[Function1[A, B] with Serializable](f)(HasFingerprint.serializable[M, Function1[A, B] with Serializable])
 
@@ -210,6 +234,7 @@ object Build {
       case Apply(fn, a) => dependencies(fn) ++ dependencies(a)
       case Flatten(nested) => dependencies(nested)
       case Cached(b, _) => dependencies(b)
+      case CachedOrBuild(_, _, fn) => dependencies(fn())
       case Named(inner, name) => name :: dependencies(inner)
     }
   }
