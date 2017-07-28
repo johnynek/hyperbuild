@@ -74,6 +74,13 @@ object HyperBuild {
     def cached(implicit ser: Serialization[A]): HyperBuild[M, A] = build match {
       case Evented(ev, fn) => Evented(ev, fn.andThen(_.cached))
     }
+
+    final def valueAt(t: Timestamp, m: Memo[M]): M[A] = {
+      import m.monadError
+
+      build.at(t)._2.run(m).map(_._1)
+    }
+
   }
 
   private case class Evented[M[_], A](ev: Event, fn: Option[Timestamp] => Build[M, A]) extends HyperBuild[M, A]

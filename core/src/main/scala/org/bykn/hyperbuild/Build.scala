@@ -178,6 +178,24 @@ object Build {
         Apply(fn, a)
     }
 
+  implicit def buildHasFingerprint[M[_]: Applicative, A]: HasFingerprint[M, Build[M, A]] = {
+    def go[B](b: Build[M, B]): M[Fingerprint] = b match {
+      case Apply(f, a) =>
+        (go(f), go(a)).map2 { (ff, fa) =>
+          Fingerprint.combineAll(Fingerprint("apply") :: ff :: fa :: Nil)
+        }
+      case Cached(c, _) => go(c) // serialization does not change the values
+      case CachedOrBuild(fp, _, _) => Applicative[M].pure(fp)
+      case const@Const(_, _) =>
+        def run[B1 <: B](c: Const[M, B1]) = c.fp.fingerprint(c.const)
+        run(const)
+      case Flatten(nested) => go(nested).map { n => Fingerprint.combineAll(Fingerprint("flatten") :: n :: Nil) }
+      case Named(b, _) => go(b) // naming does not change the result
+    }
+
+    HasFingerprint.fromM[M, Build[M, A]](go _)
+  }
+
   def mod[M[_]]: Module[M] = new Module[M]
 
   private def flattenFP(fp: Fingerprint, depth: Int): Fingerprint = {

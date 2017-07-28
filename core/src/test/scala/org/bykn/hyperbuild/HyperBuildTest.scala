@@ -8,7 +8,7 @@ import org.scalatest.FunSuite
 class HyperBuildTest extends FunSuite {
 
   def assertBuild[T](memo: Memo[IO], hb: HyperBuild[IO, T], at: Timestamp, res: T) = {
-    assert(hb.at(at, memo)._2.unsafeRunSync._1 === res)
+    assert(hb.valueAt(at, memo).unsafeRunSync === res)
   }
   def assertIO[T](io: IO[T], t: T) =
     assert(io.unsafeRunSync == t)
@@ -77,6 +77,6 @@ object BasicHyper {
 
     val liftToOpt: Build[M, Timestamp => M[Option[T]]] =
       ts.andThen(Build.mod[M].fn[M[T], M[Option[T]], MapFn](MapFn(implicitly[Functor[M]])))
-    HyperBuild.eventedM[M, Option[T]](evs, Build.mod[M].noneM[T])(liftToOpt)
+    HyperBuild.eventedM[M, Option[T]](evs, Build.mod[M].noneM[T]) { ts => liftToOpt(ts) }
   }
 }
