@@ -34,6 +34,9 @@ object HasFingerprint extends HasFingerprint0 {
       FromFn(fn.andThen(fp))
   }
 
+  def const[M[_], A](fp: Fingerprint): HasFingerprint[M, A] =
+    FromFn(_ => fp)
+
   def fingerprint[M[_]: Applicative, A](a: A)(implicit hfp: HasFingerprint[M, A]): M[Fingerprint] =
     hfp.fingerprint(a)
 
@@ -48,6 +51,9 @@ object HasFingerprint extends HasFingerprint0 {
 
   implicit def fileFingerPrint[M[_]](implicit me: MonadError[M, Throwable]): HasFingerprint[M, File] =
     fromM(Fingerprint.fromFile[M](_))
+
+  implicit def unitHasFingerprint[M[_]]: HasFingerprint[M, Unit] =
+    from[M, Unit] { _ => Fingerprint.combineAll(Fingerprint("scala") :: Fingerprint("unit") :: Nil) }
 
   implicit def optionHasFingerprint[M[_], A](implicit app: Applicative[M], hfpa: HasFingerprint[M, A]): HasFingerprint[M, Option[A]] =
     hfpa match {

@@ -2,8 +2,11 @@ package org.bykn.hyperbuild
 
 import cats.Semigroup
 
-case class Timestamp(secondsSinceEpoch: Int) {
+case class Timestamp(secondsSinceEpoch: Int) extends Ordered[Timestamp] {
   def delta(t: Int): Timestamp = Timestamp(secondsSinceEpoch + t)
+
+  def compare(that: Timestamp) =
+    Integer.compare(secondsSinceEpoch, that.secondsSinceEpoch)
 }
 
 object Timestamp {
@@ -15,6 +18,15 @@ object Timestamp {
       def combine(a: Timestamp, b: Timestamp) = Timestamp(a.secondsSinceEpoch max b.secondsSinceEpoch)
     }
 
+  def fingerprint(ts: Timestamp): Fingerprint =
+    Fingerprint.combine(Fingerprint("Timestamp"), Fingerprint(ts.secondsSinceEpoch.toString))
+
   implicit def hasFingerprint[M[_]]: HasFingerprint[M, Timestamp] =
-    HasFingerprint.from[M, Timestamp] { case Timestamp(s) => Fingerprint.combine(Fingerprint("Timestamp"), Fingerprint(s.toString)) }
+    HasFingerprint.from[M, Timestamp](fingerprint(_))
+
+  implicit def optionTimestampHasFingerprint[M[_]]: HasFingerprint[M, Option[Timestamp]] =
+    HasFingerprint.from[M, Option[Timestamp]] {
+      case None => Fingerprint.ofString("scala.None")
+      case Some(a) => Fingerprint.combine(Fingerprint("scala.Some"), fingerprint(a))
+    }
 }

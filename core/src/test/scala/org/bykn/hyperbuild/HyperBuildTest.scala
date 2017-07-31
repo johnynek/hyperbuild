@@ -1,9 +1,11 @@
 package org.bykn.hyperbuild
 
-import cats.{Functor, Monad}
+import com.twitter.bijection.Injection
+import cats.Monad
 import cats.implicits._
 import cats.effect.IO
 import org.scalatest.FunSuite
+import scala.util.Try
 
 class HyperBuildTest extends FunSuite {
 
@@ -23,31 +25,47 @@ class HyperBuildTest extends FunSuite {
 
     val buckets = 7
 
-    val memo = new MemoryMemo
     val io = makeRefs(buckets).flatMap { register =>
-      val action = Build.mod[IO].unsafeFn { ts: Timestamp =>
+      val action = Build.mod[IO].constWithFingerprint({ ts: Timestamp =>
         val reg = register(ts.secondsSinceEpoch % buckets)
         for {
           optl <- reg.get
           list = ts :: optl.getOrElse(Nil)
           _ <- reg.set(Some(list))
         } yield ()
-      }
+      }, Fingerprint("set register"))
 
-      val bld = hourlyAfter[IO, Unit](Timestamp(100))(action)
+      implicit val serU: Serialization[Unit] =
+        new Injection[Unit, Array[Byte]] {
+          val empty = new Array[Byte](0)
+          val success = Try(())
+          def apply(u: Unit) = empty
+          def invert(b: Array[Byte]): Try[Unit] =
+            if (b.length == 0) success
+            else Try(sys.error(s"found len: ${b.length}"))
+        }
+
+      val bld = hourlyAfter[IO](Timestamp(100))(action).cached
+
+      val memo = new MemoryMemo
 
       for {
         _ <- bld.valueAt(Timestamp(200), memo)
         str0 <- memo.stores
+        h0 <- memo.hits
         mis0 <- memo.misses
         _ <- bld.valueAt(Timestamp(200), memo)
         str1 <- memo.stores
+        h1 <- memo.hits
         mis1 <- memo.misses
-      } yield (str0, mis0, str1, mis1)
+      } yield (str0, h0, mis0, str1, h1, mis1)
     }
 
-    val (s0, m0, s1, m1) = io.unsafeRunSync
-    assert(((s0, m0)) == ((s1, m1))) // TODO actually cache here, both are 0
+    val (s0, h0, m0, s1, h1, m1) = io.unsafeRunSync
+    assert(((s0, m0)) == ((1, 1)))
+    assert(((s0, m0)) == ((s1, m1)))
+    assert(h0 === 0)
+    assert(h1 === 1)
   }
 }
 
@@ -68,15 +86,10 @@ object BasicHyper {
     def apply[A]: IO[IORef[A]] = IO(new Box[A])
   }
 
-  def hourlyAfter[M[_]: Monad, T](init: Timestamp)(ts: Build[M, Timestamp => M[T]]): HyperBuild[M, Option[T]] = {
+  def hourlyAfter[M[_]: Monad](init: Timestamp)(ts: Build[M, Timestamp => M[Unit]]): HyperBuild[M, Unit] = {
     val evs = Event.empty.cutover(init, Event.hourly)
 
-    case class MapFn(f: Functor[M]) extends Function1[M[T], M[Option[T]]] with Serializable {
-      def apply(m: M[T]): M[Option[T]] = f.map(m)(Some(_))
-    }
-
-    val liftToOpt: Build[M, Timestamp => M[Option[T]]] =
-      ts.andThen(Build.mod[M].fn[M[T], M[Option[T]], MapFn](MapFn(implicitly[Functor[M]])))
-    HyperBuild.eventedM[M, Option[T]](evs, Build.mod[M].noneM[T]) { ts => liftToOpt(ts) }
+    HyperBuild.evented[M, M[Unit]](evs, Build.mod[M].unit.pureBuild)(ts)
+      .flatten
   }
 }
