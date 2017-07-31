@@ -88,7 +88,28 @@ class BuildTest extends FunSuite {
     assertIO(memo.stores, 1L)
     assertIO(memo.hits, 1L)
     assertIO(memo.misses, 1L)
+  }
 
+  test("clean forces cache miss") {
+    val memo = new MemoryMemo
+
+    import ExampleBuild.lines
+
+    assertBuild(memo, lines, 59)
+    assertIO(memo.stores, 1L)
+    assertIO(memo.hits, 0L)
+    assertIO(memo.misses, 1L)
+
+    // when we run again, after clean, we miss
+    lines.clean(memo).flatMap { rmed =>
+      IO {
+        assert(rmed == 1)
+        assertBuild(memo, lines, 59)
+        assertIO(memo.stores, 2L)
+        assertIO(memo.hits, 1L) // we have a hit when we are cleaning. :/
+        assertIO(memo.misses, 2L)
+      }
+    }.unsafeRunSync
   }
 
   test("flattening with caching") {
@@ -106,8 +127,8 @@ class BuildTest extends FunSuite {
     assertIO(memo.stores, 1L)
     assertIO(memo.hits, 1L)
     assertIO(memo.misses, 1L)
-
   }
+
 }
 
 object ExampleBuild {

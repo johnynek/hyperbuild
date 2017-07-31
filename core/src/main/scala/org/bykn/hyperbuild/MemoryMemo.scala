@@ -25,6 +25,9 @@ class MemoryMemo extends Memo[IO] {
 
   def monadError = implicitly[Sync[IO]]
 
+  def remove(key: Fingerprint): IO[Int] =
+    IO { cache.remove(key).fold(0)(_ => 1) }
+
   def runNamed[T](name: String)(b: => IO[T]): IO[T] =
     for {
       _ <- IO(println(s"building: $name"))

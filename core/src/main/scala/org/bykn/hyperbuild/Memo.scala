@@ -6,6 +6,8 @@ import cats.implicits._
 trait Memo[M[_]] {
   implicit def monadError: MonadError[M, Throwable]
 
+  // returns the number of keys actually removed
+  def remove(key: Fingerprint): M[Int]
   def fetch[T](key: Fingerprint, ser: Serialization[T]): M[Option[T]]
   def store[T](key: Fingerprint, value: M[T], ser: Serialization[T]): M[T]
 

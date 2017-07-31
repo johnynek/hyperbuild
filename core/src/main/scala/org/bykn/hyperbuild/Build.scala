@@ -26,6 +26,32 @@ sealed trait Build[M[_], +A] {
   }
 
   /**
+   * Remove any cached state from the Memo,
+   * return the number of keys removed from the cache
+   */
+  final def clean(m: Memo[M]): M[Int] = {
+    import m.monadError
+
+    this match {
+      case Apply(fn, a) =>
+        (fn.clean(m), a.clean(m)).map2(_ + _)
+      case c@Cached(inner, _) =>
+        for {
+          af <- c.run(m)
+          (a, f) = af
+          cnt1 <- inner.clean(m)
+          cnt2 <- m.remove(f)
+        } yield cnt1 + cnt2
+      case CachedOrBuild(mfp, _, _) =>
+        mfp.flatMap(m.remove(_)).map(_ => 1)
+      case Const(a, hfp) => monadError.pure(0)
+      case Flatten(nested) => nested.clean(m)
+      case Named(inner, _) => inner.clean(m)
+    }
+  }
+
+
+  /**
    * Transform to a new Monad N
    */
   final def transform[N[_]](f: M ~> N): Build[N, A] =
@@ -104,6 +130,12 @@ object Build {
             // The outer-most serialization wins
             deepFlatten(depth, inner, ser)(fn)
           case cob@CachedOrBuild(_, _, _) =>
+            // TODO this is already unclear to me and a bit subtle
+            // here we have a CachedOrBuild inside an outer Cached node
+            // with some amount of flattening after. It is not 100%
+            // clear we are being consistent about keying here vs
+            // the non-outer-wrapped case, also note above we reuse the outer
+            // serialization, but here we are using cob.ser. Why the inconsistency?
             def go[T1 <: T](cob: CachedOrBuild[M, T1]): M[(R, Fingerprint)] = {
 
               // This must be a def or lazy val since below it is in a call-by-name
